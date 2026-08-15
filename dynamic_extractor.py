@@ -6,7 +6,7 @@ from invoice2data.input import pdftotext
 # 1. Setup Poppler for pdftotext
 poppler_bin_path = r"/opt/homebrew/bin/pdftotext" # Adjust to your actual path
 os.environ["PATH"] += os.pathsep + poppler_bin_path
-pdf_path = r"/Users/ap/ocr-dynamic-gem-main/file/invoiceClaude.pdf"
+pdf_path = r"/Users/ap/ocr-dynamic-gem-main/file/notax1.pdf"
 # /Users/ap/ocr-dynamic-gem-main/file/demo-invoice-no-tax-2.pdf
 try:
     # 2. Extract Raw Text using pdftotext
@@ -22,7 +22,7 @@ try:
     - "invoice_number"
     - "date" (Format as YYYY-MM-DD if possible)
     - "total_amount or total" (Number only,with decimal points, no currency symbols)
-    - "tax_amount" (If not present, return null)
+    - "tax_amount" (If not present, return null) normally in Malaysia, it is called SST or GST
 
     If a field cannot be found, set its value to null. Do not include markdown or explanations.
 
