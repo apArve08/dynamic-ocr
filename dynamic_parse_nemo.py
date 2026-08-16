@@ -20,31 +20,34 @@ def extract_dynamic_heuristics(text):
     # Patterns for each field (label patterns)
     field_patterns = {
         "invoice_number": [
-            r"invoice\s*(?:no|number|#|id)\s*[:\.]?\s*",
-            r"inv\s*(?:no|#)\s*[:\.]?\s*",
-            r"document\s*no\s*[:\.]?\s*",
-            r"bill\s*no\s*[:\.]?\s*",
-            r"order\s*no\s*[:\.]?\s*",
-            r"purchase\s*order\s*no\s*[:\.]?\s*"
+            r"invoice\s*(?:no|number|#|id)",
+            r"inv\s*(?:no|#)",
+            r"document\s*no",
+            r"bill\s*no",
+            r"order\s*no",
+            r"purchase\s*order\s*no",
+            r"ocr\s*nr"  # sometimes invoice number is labeled as OCR-nr
         ],
         "date": [
-            r"date\s*[:\.]?\s*",
-            r"issued\s*on\s*[:\.]?\s*",
-            r"billing\s*date\s*[:\.]?\s*",
-            r"invoice\s*date\s*[:\.]?\s*",
-            r"date\s*of\s*issue\s*[:\.]?\s*",
-            r"delivery\s*date\s*[:\.]?\s*"
+            r"date",
+            r"issued\s*on",
+            r"billing\s*date",
+            r"invoice\s*date",
+            r"date\s*of\s*issue",
+            r"delivery\s*date",
+            r"due\s*date"
         ],
         "total_amount": [
-            r"total\s*(?:amount|due|payable)\s*[:\.]?\s*",
-            r"grand\s*total\s*[:\.]?\s*",
-            r"amount\s*due\s*[:\.]?\s*",
-            r"total\s*balance\s*[:\.]?\s*",
-            r"net\s*amount\s*[:\.]?\s*",
-            r"total\s*price\s*[:\.]?\s*",
-            r"amount\s*to\s*pay\s*[:\.]?\s*",
-            r"total\s*due\s*[:\.]?\s*",
-            r"balance\s*due\s*[:\.]?\s*"
+            r"total\s*(?:amount|due|payable)",
+            r"grand\s*total",
+            r"amount\s*due",
+            r"total\s*balance",
+            r"net\s*amount",
+            r"total\s*price",
+            r"amount\s*to\s*pay",
+            r"total\s*due",
+            r"balance\s*due",
+            r"amount"  # sometimes just "Amount"
         ]
     }
     
@@ -66,17 +69,19 @@ def extract_dynamic_heuristics(text):
             line_stripped = line.strip()
             if not line_stripped:
                 continue
+            line_lower = line_stripped.lower()
             for pattern in patterns:
-                # Try to match the pattern at the beginning of the line (after stripping)
-                match = re.match(pattern, line_stripped, re.IGNORECASE)
+                # Try to match the pattern in the line (could be at start or middle)
+                match = re.search(pattern, line_lower)
                 if match:
-                    # Extract the rest of the line after the pattern
-                    value = line_stripped[match.end():].strip()
-                    if value:
-                        data[field] = value
+                    # We found a label, now try to extract the value
+                    # Option 1: value on same line after the label
+                    value_same_line = line_stripped[match.end():].strip()
+                    if value_same_line:
+                        data[field] = value_same_line
                         found = True
                         break
-                    # If no value on same line, look ahead
+                    # Option 2: value on next non-empty line(s) that doesn't look like a label
                     if not found:
                         for j in range(i+1, min(i+4, len(lines))):
                             candidate = lines[j].strip()
@@ -115,119 +120,145 @@ def extract_dynamic_heuristics(text):
                     except ValueError:
                         data[field] = money_matches[-1].replace(',', '')
     
-    # --- Line Item Extraction (Row-wise tables) ---
-    # Look for a header line that contains at least two item-related keywords
-    item_keywords = ["description", "item", "qty", "quantity", "unit price", "price", "amount", "line total"]
-    header_index = -1
-    for i, line in enumerate(lines):
-        line_lower = line.lower()
-        # Count how many item keywords are in this line
-        count = sum(1 for kw in item_keywords if kw in line_lower)
-        if count >= 2:
-            header_index = i
+    # --- Line Item Extraction: Block-based Method ---
+    # Define what constitutes a header line for the item table
+    item_header_keywords = set([
+        'description', 'item', 'qty', 'quantity', 'unit price', 'price', 
+        'amount', 'line total', 'rebate', 'tax', 'unit', 'line', 'item #', '#'
+    ])
+    # Define keywords that indicate the end of the item table (total lines)
+    total_keywords = set([
+        'subtotal', 'tax', 'total', 'balance', 'grand total', 'amount due'
+    ])
+    
+    # Helper to check if a block is a header block (not empty, contains an item header keyword, and is not a total block)
+    def is_header_block(block):
+        if not block:
+            return False
+        combined = ' '.join(block).lower()
+        # Skip if it's a total block
+        if any(tk in combined for tk in total_keywords):
+            return False
+        # Check if it contains any item header keyword
+        return any(hk in combined for hk in item_header_keywords)
+    
+    # Helper to check if a block is a data block (not empty, not a header block, and not a total block)
+    def is_data_block(block):
+        if not block:
+            return False
+        combined = ' '.join(block).lower()
+        # Skip if it's a total block
+        if any(tk in combined for tk in total_keywords):
+            return False
+        # Skip if it's a header block
+        if is_header_block(block):
+            return False
+        return True
+    
+    # Step 1: Split the text into blocks of consecutive non-empty lines (separated by one or more empty lines).
+    blocks = []
+    current_block = []
+    for line in lines:
+        if line.strip() == '':
+            if current_block:
+                blocks.append(current_block)
+                current_block = []
+        else:
+            current_block.append(line.strip())
+    if current_block:
+        blocks.append(current_block)
+    
+    # Step 2: Find the first header block index.
+    header_start = -1
+    for i, block in enumerate(blocks):
+        if is_header_block(block):
+            header_start = i
             break
     
-    if header_index != -1:
-        header_line = lines[header_index]
-        # Split header by 2 or more spaces or tabs
-        header_fields = [field.strip() for field in re.split(r'\s{2,}|\t', header_line) if field.strip()]
+    if header_start != -1:
+        # Step 3: Collect consecutive header blocks starting from header_start
+        header_blocks = []
+        i = header_start
+        while i < len(blocks) and is_header_block(blocks[i]):
+            header_blocks.append(blocks[i])
+            i += 1
         
-        # Collect data lines until we hit a total/subtotal keyword or empty line
-        data_lines = []
-        for i in range(header_index + 1, len(lines)):
-            line = lines[i].strip()
-            if not line:
-                break
-            line_lower = line.lower()
-            if any(kw in line_lower for kw in ["subtotal", "tax", "total", "balance", "grand total", "amount due"]):
-                break
-            data_lines.append(line)
+        # Step 4: After the header sequence, collect all consecutive non-header blocks (candidate data blocks)
+        data_blocks = []
+        while i < len(blocks) and is_data_block(blocks[i]):
+            data_blocks.append(blocks[i])
+            i += 1
         
-        # Process each data line
-        for data_line in data_lines:
-            # Split by 2 or more spaces or tabs
-            data_fields = [field.strip() for field in re.split(r'\s{2,}|\t', data_line) if field.strip()]
-            if len(data_fields) == len(header_fields):
-                item = {}
-                for h, d in zip(header_fields, data_fields):
-                    # Normalize header to a key
-                    key = h.lower().replace(' ', '_').replace('-', '_')
-                    item[key] = d
-                # Map to standard fields
-                std_item = {
-                    "description": "",
-                    "qty": "",
-                    "unit_price": "",
-                    "line_total": ""
-                }
-                for key, value in item.items():
-                    if 'description' in key or 'item' in key:
-                        std_item["description"] = value
-                    elif 'qty' in key or 'quantity' in key:
-                        std_item["qty"] = value
-                    elif 'unit' in key and 'price' in key:
+        # Now we have header_blocks and data_blocks.
+        # We expect the number of data blocks to be at least the number of header blocks.
+        # If we have more data blocks than header blocks, we take the first len(header_blocks) data blocks.
+        # If we have fewer, we pad with empty blocks.
+        if len(data_blocks) < len(header_blocks):
+            # Pad data_blocks with empty blocks
+            data_blocks.extend([[]] * (len(header_blocks) - len(data_blocks)))
+        else:
+            # Truncate data_blocks to the first len(header_blocks) blocks
+            data_blocks = data_blocks[:len(header_blocks)]
+        
+        # Step 5: If we still have more header blocks than data blocks (shouldn't happen after above, but just in case),
+        # we try to merge consecutive header blocks from the end backwards until the counts match.
+        while len(header_blocks) > len(data_blocks) and len(header_blocks) > 1:
+            # Merge the last two header blocks: combine their lines into one block.
+            merged_block = header_blocks[-2] + header_blocks[-1]
+            header_blocks = header_blocks[:-2] + [merged_block]
+        # If after merging we still have more header blocks than data blocks, we truncate header_blocks (shouldn't happen)
+        if len(header_blocks) > len(data_blocks):
+            header_blocks = header_blocks[:len(data_blocks)]
+        # If we have fewer header blocks than data blocks, we pad header_blocks with empty blocks
+        while len(header_blocks) < len(data_blocks):
+            header_blocks.append([])
+        
+        # Now we have equal numbers of header_blocks and data_blocks.
+        # Step 6: Combine lines in each header block to form a header string.
+        header_strings = []
+        for block in header_blocks:
+            header_strings.append(' '.join(block))
+        
+        # Step 7: Pad each data block to the maximum length of any data block
+        max_len = 0
+        for block in data_blocks:
+            if len(block) > max_len:
+                max_len = len(block)
+        for idx in range(len(data_blocks)):
+            block = data_blocks[idx]
+            if len(block) < max_len:
+                block.extend([''] * (max_len - len(block)))
+        
+        # Step 8: Now create items: each row is formed by taking the i-th element from each data block.
+        for row_idx in range(max_len):
+            item = {}
+            for col_idx, header in enumerate(header_strings):
+                value = data_blocks[col_idx][row_idx] if row_idx < len(data_blocks[col_idx]) else ''
+                item[header] = value
+            
+            # Map to standard fields
+            std_item = {
+                "description": "",
+                "qty": "",
+                "unit_price": "",
+                "line_total": ""
+            }
+            for header, value in item.items():
+                header_lower = header.lower()
+                if 'description' in header_lower or 'item' in header_lower or 'desc' in header_lower:
+                    std_item["description"] = value
+                elif 'qty' in header_lower or 'quantity' in header_lower:
+                    std_item["qty"] = value
+                elif 'unit' in header_lower and 'price' in header_lower:
+                    std_item["unit_price"] = value
+                elif 'price' in header_lower and 'unit' not in header_lower:  # fallback for price
+                    if not std_item["unit_price"]:
                         std_item["unit_price"] = value
-                    elif 'price' in key and 'unit' not in key:  # fallback for price
-                        if not std_item["unit_price"]:
-                            std_item["unit_price"] = value
-                    elif ('line' in key and 'total' in key) or key == 'amount' or key == 'total':
-                        std_item["line_total"] = value
-                # Only add if we have at least description and one other field
-                if std_item["description"] and (std_item["qty"] or std_item["unit_price"] or std_item["line_total"]):
-                    data["items"].append(std_item)
-    
-    # Fallback: if no items found, try to find lines that look like they contain item data (description followed by numbers)
-    if not data["items"]:
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            # Skip lines that are clearly headers or totals
-            line_lower = line.lower()
-            if any(kw in line_lower for kw in ["description", "item", "qty", "quantity", "unit", "price", "amount", "subtotal", "total", "balance"]):
-                continue
-            # Look for a pattern: text followed by at least two numbers
-            # We'll split by spaces and see if we have at least 3 tokens where the last two are numbers
-            tokens = re.split(r'\s+', line)
-            if len(tokens) >= 3:
-                # Check if the last two tokens are numbers (with possible decimal/comma)
-                last_two = tokens[-2:]
-                if all(re.match(r'^[\d,.]+$', t) for t in last_two):
-                    # Assume the first token(s) is the description, and we have at least qty and unit_price or line_total
-                    description = ' '.join(tokens[:-2])
-                    # We have two numbers: let's assume they are qty and unit_price, and we don't have line_total
-                    # Or if we have three numbers, then qty, unit_price, line_total
-                    if len(tokens) == 3:
-                        std_item = {
-                            "description": description,
-                            "qty": tokens[-2],
-                            "unit_price": tokens[-1],
-                            "line_total": ""  # we don't have line_total
-                        }
-                    elif len(tokens) >= 4:
-                        # Check if the third last is also a number
-                        if re.match(r'^[\d,.]+$', tokens[-3]):
-                            std_item = {
-                                "description": ' '.join(tokens[:-3]),
-                                "qty": tokens[-3],
-                                "unit_price": tokens[-2],
-                                "line_total": tokens[-1]
-                            }
-                        else:
-                            # Only two numbers at the end
-                            std_item = {
-                                "description": ' '.join(tokens[:-2]),
-                                "qty": tokens[-2],
-                                "unit_price": tokens[-1],
-                                "line_total": ""
-                            }
-                    else:
-                        continue
-                    if std_item["description"] and (std_item["qty"] or std_item["unit_price"]):
-                        data["items"].append(std_item)
-                        # Break after a few to avoid too many false positives
-                        if len(data["items"]) >= 5:
-                            break
+                elif ('line' in header_lower and 'total' in header_lower) or header_lower == 'amount' or header_lower == 'total':
+                    std_item["line_total"] = value
+            # Only add if we have at least description and one other field
+            if std_item["description"] and (std_item["qty"] or std_item["unit_price"] or std_item["line_total"]):
+                data["items"].append(std_item)
     
     return data
 
