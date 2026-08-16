@@ -17,7 +17,7 @@ DATE = rf"(?:{NUMERIC_DATE}|{ALPHA_DATE})"
 
 # Labels that mean "this is not the invoice date" / "this is not the grand total".
 DATE_BLOCKERS = r"due|delivery|deliver|sched|ship|shipped|shipping|order|received|paid|expir\w*"
-TOTAL_BLOCKERS = r"excluding|exclusive|before\s+tax"
+TOTAL_BLOCKERS = r"excluding|exclusive|before\\s+tax"
 
 
 def setup_poppler():
@@ -60,7 +60,7 @@ def parse_date(raw, dayfirst=False):
         return None
 
 
-def find_labeled_values(text, alias_tiers, value_regex, gap=r"[:\s.\-]*", blockers=None):
+def find_labeled_values(text, alias_tiers, value_regex, gap=r"[:\\s.\\-]*", blockers=None):
     """Collect every (tier, position, value) where a ranked label precedes a value.
 
     `alias_tiers` is a list of alias lists ordered most-specific-first; a tier's
@@ -108,7 +108,10 @@ def first_in_best_tier(text, keyword_tiers, use_end):
 
 
 def _extract_items_block_based(text):
-    """Extract line items using block-based method (column-major table format)."""
+    """Extract line items using block-based method, handling both formats:
+    1. Embedded header/data: [header term, data1, data2, ...] in one block
+    2. Separate header/data: [header term], [data1], [data2], ... in consecutive blocks
+    """
     lines = [line.rstrip() for line in text.split('\n')]
     item_header_keywords = set([
         'description', 'item', 'qty', 'quantity', 'unit price', 'price', 
@@ -178,6 +181,9 @@ def _extract_items_block_based(text):
         data_blocks.append(blocks[i])
         i += 1
     
+    if not header_blocks or not data_blocks:
+        return []
+    
     # Adjust counts: we expect same number of header and data blocks
     if len(data_blocks) < len(header_blocks):
         data_blocks.extend([[]] * (len(header_blocks) - len(data_blocks)))
@@ -238,6 +244,7 @@ def _extract_items_block_based(text):
                     std_item["unit_price"] = value
             elif ('line' in header_lower and 'total' in header_lower) or header_lower == 'amount' or header_lower == 'total':
                 std_item["line_total"] = value
+        # Only add if we have at least description and one other field
         if std_item["description"] and (std_item["qty"] or std_item["unit_price"] or std_item["line_total"]):
             items.append(std_item)
     return items
@@ -250,8 +257,8 @@ def _extract_items_line_based(text, MONEY):
     """
     # Tiers again: a bare "total" is ambiguous because "LINE TOTAL" appears in the
     # header row itself, so only fall back to it when no "subtotal" is present.
-    table_start_keywords = [[r"description"], [r"item", r"qty", r"unit\s*price", r"amount"]]
-    table_end_keywords = [[r"subtotal", r"grand\s*total"], [r"total", r"tax", r"balance"]]
+    table_start_keywords = [[r"description"], [r"item", r"qty", r"unit\\s*price", r"amount"]]
+    table_end_keywords = [[r"subtotal", r"grand\\s*total"], [r"total", r"tax", r"balance"]]
     
     def first_in_best_tier_local(text, keyword_tiers, use_end):
         for tier in keyword_tiers:
@@ -279,7 +286,7 @@ def _extract_items_line_based(text, MONEY):
                 continue
             
             # Money first so a full amount is never split into two bare integers.
-            numbers = re.findall(rf"{MONEY}|(?<![\d.,])\d+(?![\d.,])", line)
+            numbers = re.findall(rf"{MONEY}|(?<![\\d.,])\\d+(?![\\d.,])", line)
             
             if len(numbers) >= 2:
                 first_num_pos = line.find(numbers[0])
@@ -343,7 +350,7 @@ def extract_dynamic_heuristics(text, dayfirst=False):
 
     # 1. Invoice Number -- earliest match in the most specific tier that hit.
     data["invoice_number"] = pick(
-        find_labeled_values(normalized_text, KEYWORDS["invoice_number"], r"[A-Z0-9\-\/]+"),
+        find_labeled_values(normalized_text, KEYWORDS["invoice_number"], r"[A-Z0-9\\-\\/]+"),
         prefer="first",
     )
 
@@ -366,7 +373,7 @@ def extract_dynamic_heuristics(text, dayfirst=False):
             normalized_text,
             KEYWORDS["total_amount"],
             MONEY,
-            gap=r"[^\d]{0,25}?",
+            gap=r"[^\\d]{0,25}?",
             blockers=TOTAL_BLOCKERS,
         ),
         prefer="last",

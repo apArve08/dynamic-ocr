@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 
 import requests
@@ -11,7 +12,9 @@ from invoice2data.input import pdftotext
 from dynamic_parsing import parse_date, parse_money, setup_poppler
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-DEFAULT_MODEL = "glm-ocr:q8_0"
+# glm-ocr is a 1.1B *vision* model; on pre-extracted text it scored 0/12 on the
+# sample invoices. llama3.2:3b scores 11/12 and is ~5x faster. See README.
+DEFAULT_MODEL = "gemma4:31b-cloud"
 DEFAULT_TIMEOUT = 120
 
 # Passed to Ollama's `format` field. A real schema (rather than the string
@@ -35,6 +38,10 @@ Return ONLY a valid JSON object using exactly these keys:
 - "date" (Format as YYYY-MM-DD if possible)
 - "total_amount" (Number only, with decimal points, no currency symbols)
 - "tax_amount" (Number only. In Malaysia this is labelled SST or GST. If not present, return null)
+
+Copy every value verbatim from the text. Never calculate, sum, infer, or estimate a
+value. If a value does not literally appear in the text, return null for it.
+Purchase orders often have no total at all -- return null rather than adding up the lines.
 
 If a field cannot be found, set its value to null. Do not include markdown or explanations.
 
@@ -64,11 +71,56 @@ def extract_with_llm(raw_text, model=DEFAULT_MODEL, timeout=DEFAULT_TIMEOUT):
     payload = response.json()
     if "response" not in payload:
         raise ValueError(f"Ollama returned no 'response' field: {payload}")
-    return json.loads(payload["response"])
+    return loads_lenient(payload["response"])
 
 
-def normalize(extracted):
-    """Coerce the model's strings into the same types the heuristic path returns."""
+def loads_lenient(text):
+    """Parse the model's JSON, tolerating markdown fences.
+
+    Ollama's `format` schema is enforced by grammar-constrained decoding, which
+    only happens for locally-run models. Cloud-hosted models (`*-cloud`) ignore
+    it, so they may wrap the object in ```json fences and emit numbers where the
+    schema asked for strings.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
+            raise
+        return json.loads(match.group(0))
+
+
+def is_grounded(value, raw_text):
+    """True if the value's digits appear verbatim in the source text.
+
+    A local model will happily sum the line items and report the result as the
+    invoice total even when the document has no total line. Comparing digits
+    (ignoring separators, so 1,072.83 matches 107283) catches those inventions.
+    """
+    if value is None:
+        return True
+    digits = re.sub(r"\D", "", str(value))
+    if not digits:
+        return True
+    return digits in re.sub(r"\D", "", raw_text)
+
+
+def normalize(extracted, raw_text=None):
+    """Coerce the model's strings into the same types the heuristic path returns.
+
+    When `raw_text` is supplied, amounts that do not appear in it are dropped.
+    """
+    if raw_text is not None:
+        for field in ("total_amount", "tax_amount"):
+            if not is_grounded(extracted.get(field), raw_text):
+                print(
+                    f"Warning: dropped ungrounded {field}={extracted[field]!r} "
+                    "(not present in the source text)",
+                    file=sys.stderr,
+                )
+                extracted[field] = None
+
     return {
         "issuer": extracted.get("issuer") or None,
         "invoice_number": extracted.get("invoice_number") or None,
@@ -121,7 +173,7 @@ def main():
         print(f"Could not parse the model's JSON output: {e}", file=sys.stderr)
         return 1
 
-    data = normalize(extracted)
+    data = normalize(extracted, raw_text)
     print("\n--- DYNAMICALLY EXTRACTED DATA ---")
     print(f"Issuer     : {data['issuer']}")
     print(f"Invoice #  : {data['invoice_number']}")
