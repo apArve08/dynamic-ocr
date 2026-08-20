@@ -106,11 +106,26 @@ def is_grounded(value, raw_text):
     return digits in re.sub(r"\D", "", raw_text)
 
 
+def as_text(value):
+    """Force a model-supplied value to str or None.
+
+    Cloud models ignore the `format` schema and return `1072.83` as a JSON float
+    rather than the string the schema asked for, so coerce here -- at the boundary
+    where model output enters -- instead of trusting the schema.
+    """
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    return text.strip() or None
+
+
 def normalize(extracted, raw_text=None):
     """Coerce the model's strings into the same types the heuristic path returns.
 
     When `raw_text` is supplied, amounts that do not appear in it are dropped.
     """
+    extracted = {k: as_text(v) for k, v in extracted.items()}
+
     if raw_text is not None:
         for field in ("total_amount", "tax_amount"):
             if not is_grounded(extracted.get(field), raw_text):
